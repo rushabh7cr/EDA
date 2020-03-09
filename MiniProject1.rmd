@@ -1,0 +1,247 @@
+---
+title: "02_11_19"
+author: "Aakash Ahuja"
+date: "11/02/2020"
+output:
+  word_document: default
+  pdf_document: default
+  html_document:
+    df_print: paged
+always_allow_html: yes
+---
+**Loading Libraries and Data**
+```{r}
+#Loading Libraries
+#install.packages('tidycensus')
+library(tidycensus)
+census_api_key("38db8e5473d1110e8747ea3c3607201b634f3538")
+#install.packages('readxl')
+library(readxl)
+#install.packages('plotly')
+library(plotly)
+#install.packages('lubridate')
+library(lubridate)
+library(tidyr)
+library(dplyr)
+#install.packages('forecast')
+library(forecast)
+library(scales)
+#Loading the State abbreviations Data
+state_abbreviations<-read.table('state_abbrevs.txt', header = T)
+
+#Loading the US State Data
+state_and_us_data<-read_xls('State_and_US_SA.xls')
+
+#Slicing the extra rows and columns from the data
+t1<-state_and_us_data %>% slice(5)
+state_and_us_data<-state_and_us_data %>% slice(6:545)
+colnames(state_and_us_data)<-t1
+
+#Loading the CPI Data
+cpi<-read.csv('cpi.csv')
+cpi<-subset(cpi,Year>=1975 & Year<=2019)
+```
+
+**Adjusting the Month Variable**
+```{r}
+str(state_and_us_data$Month)
+#Converting Date Variable
+temporary_date<-strsplit(as.character(state_and_us_data$Month), "M")
+temporary_date<- as.data.frame(matrix(unlist(temporary_date), byrow = T, ncol = 2))
+
+temporary_date$V1<- as.numeric(as.character(temporary_date$V1))
+temporary_date$V2<- as.numeric(as.character(temporary_date$V2))
+
+temporary_date$Date <- with(temporary_date, sprintf("%d-%02d", V1, V2))
+
+temporary_date$Date<-parse_date_time(temporary_date$Date,"ym")
+
+#Putting this transformed date variable into main date variable
+state_and_us_data$Month<-temporary_date$Date
+str(state_and_us_data$Month)
+```
+
+```{r}
+#Adjusting House Price Index for inflation after using the CPI values
+state_and_us_data$cpi<-cpi$Value
+
+state_and_us_data$inflation_adjusted_us_data<-(as.numeric(state_and_us_data$`United States seasonally adjusted`) * 174.600)/state_and_us_data$cpi
+```
+
+
+```{r}
+#Converting to time series data
+myts<-ts(state_and_us_data$`United States seasonally adjusted`,start = c(1975,1), end = c(2019,12), frequency = 12)
+
+#Converting to time series non seasonally adjusted data
+myts1<-ts(state_and_us_data$inflation_adjusted_us_data,start = c(1975,1), end = c(2019,12), frequency = 12)
+
+#Plotting my time series
+plot(myts, col='red', xlab="Year", ylab="House Price Index")+
+lines(myts1, col='Blue')
+legend('topright',legend = c("HPI", "HPI(Adjusted)"), col=c("red",'Blue'))
+```
+After adjusting for inflation, it can be seen that the house prices increased over the span of 45 years(1975-2019). Although, there is a sudden drop in house prices observed during the time period 2008-2010. Then the house prices start increasing again after year 2012
+
+
+```{r}
+#Using Gather function to prepare longer version of us state data
+c1<-colnames(state_and_us_data)[2:52]
+temp2<-state_and_us_data[,-c(53,54)]
+state_and_us_data_long<-temp2 %>%
+  gather(key="Code",value = "hpi_value",c1 )
+
+state_and_us_data_long<-left_join(state_and_us_data_long,state_abbreviations,by='Code')
+state_and_us_data_long<-state_and_us_data_long[,-c(2)]
+```
+
+To observe the variations in house price index on the basis of the states, we create a new data frame by aggregating the longer version of us data and the mean of hpi values for every state and year.
+
+```{r}
+#By state HPI
+str(state_and_us_data_long$hpi_value)
+Mean_House_Price_By_State<-aggregate(as.numeric(hpi_value)~year(Month)+State,FUN =mean, data = state_and_us_data_long)
+colnames(Mean_House_Price_By_State)<-c("Month","State","hpi_value")
+
+#Plotting HPI for each state
+temp1<-Mean_House_Price_By_State
+temp1$Month<-as.Date(as.character(Mean_House_Price_By_State$Month), format = "%Y")
+
+ggplot(data = temp1, aes(x=Month,y=hpi_value))+
+  geom_point(alpha=0.5, size=0.2 )+
+  geom_smooth(method = 'loess')+
+  facet_wrap(~State,ncol=13)+ scale_x_date(labels = date_format("%y"))
+
+
+#Calculating  Percentage change in House Price Index for each state by year
+Mean_House_Price_By_State$percentage_change<-0
+
+for (i in 1:nrow(Mean_House_Price_By_State)) {
+  if (Mean_House_Price_By_State$Month[i]!=1975){
+  Mean_House_Price_By_State$percentage_change[i]<-((Mean_House_Price_By_State$hpi_value[i]-Mean_House_Price_By_State$hpi_value[i-1])/(Mean_House_Price_By_State$hpi_value[i]))*100
+  }
+  else{
+    Mean_House_Price_By_State$percentage_change[i]<-0
+  }
+}
+
+Mean_House_Price_By_State[which.max(Mean_House_Price_By_State$percentage_change),]
+#Rhode Island in year 1987
+
+Mean_House_Price_By_State[which.min(Mean_House_Price_By_State$percentage_change),]
+#Nevada in the year 2009
+```
+It can be seen that every state in US follows a general trend, in which the house price index tends to increase over time but there's a sudden drop in the house prices in 2008 or 2009 due to the economic recession. The biggest change of 24.65% in house prices was observed for Rhode Island for the year 1987 and the smallest change of -38% was observed for Nevada for the year 2009. Although there are states like Nevada and District of Columbia, which deviates from the similar pattern as the house prices keeps on increasing even after the recession period of 2008-2010. These two states can be considered as outliers.
+
+
+```{r}
+#By Region HPI
+Mean_House_Price_By_Region<-aggregate(as.numeric(hpi_value)~year(Month)+Region,FUN = mean, data = state_and_us_data_long)
+colnames(Mean_House_Price_By_Region)<-c("Month","Region","House_Price_Index")
+#Plotting HPI for each region
+temp2<-Mean_House_Price_By_Region
+temp2$Month<-as.Date(as.character(Mean_House_Price_By_Region$Month), format = "%Y")
+
+ggplot(data = temp2, aes(x=Month,y=House_Price_Index))+
+  geom_point(alpha=0.5, size=0.2 )+
+  geom_smooth(method = 'loess')+
+  facet_wrap(~Region,ncol=2)+ scale_x_date(labels = date_format("%y"))
+
+```
+After plotting the region-wise distribution of house prices, it is seen that it follows the general trend and the house prices increase over the period, with a sudden drop in house prices during the period 2008-2010.
+
+
+```{r}
+present_density <- get_estimates(geography = "state", product = "population")
+present_density <- present_density[53:103,]
+```
+
+```{r}
+
+temp1<-aggregate(as.numeric(hpi_value)~State,FUN =mean, data = state_and_us_data_long)
+colnames(temp1)<-c("State","House_Price_Index")
+
+#Plotting HPI for each state
+
+library(scales)
+
+g<-ggplot(data = temp1, aes(x=State,y=House_Price_Index))+ geom_bar(stat = "identity")
+ggplotly(g)
+names(present_density)[1] <-"State"
+temp3<-left_join(Mean_House_Price_By_State,present_density,by = "State")
+
+temp4 <-aggregate(as.numeric(hpi_value)~State,FUN =mean, data = temp3)
+
+temp4 <- cbind(temp4,present_density$value)
+
+
+colnames(temp4)<-c("State","House_Price_Index", "Density")
+fit1 <- lm(House_Price_Index~Density, data = temp4)
+summary(fit1)
+cor(temp4$House_Price_Index,temp4$Density) 
+ggplot(data = temp4, aes(y=Density, x = House_Price_Index))+geom_point() + geom_smooth(method='lm',se=F) 
+
+temp4['Density'>10000]
+temp4 <- temp4[-c(9),]
+print(temp4)
+ggplot(data = temp4, aes(y=Density, x = House_Price_Index))+geom_point() + geom_smooth(method='loess',se=F) 
+cor(temp4$House_Price_Index,temp4$Density)
+
+
+t5 <- state_abbreviations
+t5 <- t5[-c(9),]
+t5$Density <- present_density$value[which(present_density$value<10000)]
+t5$hpi <- temp4$House_Price_Index
+
+
+ggplot(data = t5, aes(x=Density,y=hpi))+
+  geom_point(alpha=0.5, size=0.2 )+
+  geom_smooth(method = 'loess')+
+  facet_wrap(~Region,ncol=2)
+
+cor(t5[t5$Region=='Midwest',]$Density,t5[t5$Region=='Midwest',]$hpi)
+cor(t5[t5$Region=='Northeast',]$Density,t5[t5$Region=='Northeast',]$hpi)
+cor(t5[t5$Region=='South',]$Density,t5[t5$Region=='South',]$hpi)
+cor(t5[t5$Region=='West',]$Density,t5[t5$Region=='West',]$hpi)
+
+#NumericVariables<-apply(t5$Density,Outlier_capping)
+```
+
+
+```{r}
+
+pop_1990 <- get_decennial(geography = "state", variables = "P0010001", year = 1990)
+pop_2000 <- get_decennial(geography = "state", variables = "P001001", year = 2000)
+pop_2010 <- get_decennial(geography = "state", variables = "P001001", year = 2010)
+pop_2010 <- pop_2010[-c(52),]
+
+mean_hpi_1990 <- subset(Mean_House_Price_By_State,Month >=1990 & Month<=2000)
+mean_hpi_1990<-aggregate(hpi_value~State,FUN =mean, data = mean_hpi_1990)
+print(mean_hpi_1990)
+
+mean_hpi_2000 <- subset(Mean_House_Price_By_State,Month >=2000 & Month<=2010)
+mean_hpi_2000<-aggregate(hpi_value~State,FUN =mean, data = mean_hpi_2000)
+print(mean_hpi_2000)
+
+mean_hpi_2010 <- subset(Mean_House_Price_By_State,Month >=2000 & Month<=2019)
+mean_hpi_2010<-aggregate(hpi_value~State,FUN =mean, data = mean_hpi_2010)
+print(mean_hpi_2010)
+
+hpi_pop_1990 <- cbind(pop_1990,hpi_mean = mean_hpi_1990$hpi_value)
+hpi_pop_2000 <- cbind(pop_2000,hpi_mean = mean_hpi_2000$hpi_value)
+hpi_pop_2010 <- cbind(pop_2010,hpi_mean = mean_hpi_2010$hpi_value)
+hpi_pop_1990$year_range <- "1990-2000"
+hpi_pop_2000$year_range <- "2000-2010"
+hpi_pop_2010$year_range <- "2010-Present"
+
+hpi_pop_all_years <- rbind(hpi_pop_1990,hpi_pop_2000,hpi_pop_2010) 
+ggplot(data = hpi_pop_all_years, aes(x=value,y=hpi_mean))+
+  geom_point(alpha=0.5, size=0.2 )+
+  geom_smooth(method = 'loess')+
+  facet_wrap(~year_range,ncol=3)
+
+```
+It can be seen from the three graphs that during the 1990-2000 period, the house prices were extremely low even for higher populated states. Whereas, the trend is sort of similar in the next time span of 20 years(2000-2019), where the house prices increased even for states in which the population was extremely low.
+
+
+
